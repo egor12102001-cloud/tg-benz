@@ -10,6 +10,7 @@ import re
 from typing import Optional
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -260,7 +261,7 @@ async def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN environment variable is not set")
 
-    bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
+    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
     await bot.set_my_commands([
         BotCommand(command="start", description="Начало работы"),
         BotCommand(command="city", description="Выбрать город из списка"),
