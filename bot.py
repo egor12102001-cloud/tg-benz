@@ -170,10 +170,11 @@ async def _show_city(message: Message, city_name: str) -> None:
         log_query(uid, cid, ctype, city_name, success=True, stations=len(result.stations))
         log.info("user=%s city=%s stations=%d", uid, city_name, len(result.stations))
 
+    no_preview = LinkPreviewOptions(is_disabled=True)
     chunks = _fmt_result(result)
-    await msg.edit_text(chunks[0], parse_mode="HTML")
+    await msg.edit_text(chunks[0], parse_mode="HTML", link_preview_options=no_preview)
     for chunk in chunks[1:]:
-        await message.answer(chunk, parse_mode="HTML")
+        await message.answer(chunk, parse_mode="HTML", link_preview_options=no_preview)
 
 
 def _require_admin(message: Message) -> bool:
