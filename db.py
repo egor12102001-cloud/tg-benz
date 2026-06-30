@@ -17,6 +17,9 @@ def _connect() -> sqlite3.Connection:
 
 def init_db() -> None:
     with _connect() as con:
+        # 1. Create tables/columns as they existed in the very first schema version.
+        #    New columns are added via migration below, *before* any index that
+        #    references them — SQLite indexes can't reference nonexistent columns.
         con.executescript("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id     INTEGER PRIMARY KEY,
@@ -24,7 +27,6 @@ def init_db() -> None:
                 first_name  TEXT,
                 last_name   TEXT,
                 role        TEXT NOT NULL DEFAULT 'user',
-                last_city   TEXT,
                 first_seen  TEXT NOT NULL,
                 last_seen   TEXT NOT NULL
             );
@@ -35,7 +37,6 @@ def init_db() -> None:
                 chat_id       INTEGER NOT NULL,
                 chat_type     TEXT NOT NULL,
                 city          TEXT NOT NULL,
-                city_norm     TEXT NOT NULL DEFAULT '',
                 success       INTEGER NOT NULL DEFAULT 1,
                 error         TEXT,
                 stations      INTEGER,
@@ -53,19 +54,23 @@ def init_db() -> None:
                 UNIQUE(user_id, city_norm)
             );
 
-            CREATE INDEX IF NOT EXISTS queries_user      ON queries(user_id);
-            CREATE INDEX IF NOT EXISTS queries_city_norm ON queries(city_norm);
-            CREATE INDEX IF NOT EXISTS queries_created   ON queries(created_at);
-            CREATE INDEX IF NOT EXISTS subs_user         ON subscriptions(user_id);
+            CREATE INDEX IF NOT EXISTS queries_user    ON queries(user_id);
+            CREATE INDEX IF NOT EXISTS queries_created ON queries(created_at);
+            CREATE INDEX IF NOT EXISTS subs_user       ON subscriptions(user_id);
         """)
-        # Lightweight migration for older DBs missing new columns
+
+        # 2. Migrate older DBs to the current column set.
         cols = {r["name"] for r in con.execute("PRAGMA table_info(users)")}
         if "last_city" not in cols:
             con.execute("ALTER TABLE users ADD COLUMN last_city TEXT")
+
         cols = {r["name"] for r in con.execute("PRAGMA table_info(queries)")}
         if "city_norm" not in cols:
             con.execute("ALTER TABLE queries ADD COLUMN city_norm TEXT NOT NULL DEFAULT ''")
             con.execute("UPDATE queries SET city_norm = LOWER(TRIM(city)) WHERE city_norm = ''")
+
+        # 3. Indexes that depend on migrated columns.
+        con.execute("CREATE INDEX IF NOT EXISTS queries_city_norm ON queries(city_norm)")
 
 
 # ─── users ───────────────────────────────────────────────────────────────────
