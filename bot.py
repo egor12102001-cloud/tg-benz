@@ -21,8 +21,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats,
     BotCommandScopeChat, BufferedInputFile, CallbackQuery, InlineKeyboardButton,
-    InlineKeyboardMarkup, KeyboardButton, Message, LinkPreviewOptions,
-    ReplyKeyboardMarkup, ReplyKeyboardRemove,
+    InlineKeyboardMarkup, Message, LinkPreviewOptions,
 )
 
 from db import (
@@ -32,7 +31,7 @@ from db import (
 )
 from scraper import (
     NearbyResult, Station, STATUS_EMOJI, STATUS_LABEL,
-    fetch_city_fuel, geocode_city, get_nearby_stations, normalize_city, reverse_geocode,
+    fetch_city_fuel, geocode_city, get_nearby_stations, normalize_city,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -83,12 +82,6 @@ GROUP_COMMANDS = [
     BotCommand(command="fuelnow", description="Только с топливом: /fuelnow Город"),
     BotCommand(command="help",    description="Справка"),
 ]
-
-LOCATION_KB = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="📍 Отправить геопозицию", request_location=True)]],
-    resize_keyboard=True, one_time_keyboard=True,
-)
-
 
 # ─── keyboards ───────────────────────────────────────────────────────────────
 
@@ -262,21 +255,18 @@ async def cmd_start(message: Message):
 
     text = (
         "👋 <b>Привет!</b> Я показываю наличие топлива на АЗС из <b>gdebenz.ru</b>.\n\n"
-        "Напишите название города или отправьте геопозицию — я предложу выбрать режим показа.\n\n"
+        "Напишите название города — я предложу выбрать режим показа.\n\n"
         "/help — справка"
     )
-    kb = LOCATION_KB
     if last_city:
         text += f"\n\nПоследний запрошенный город: <b>{last_city}</b>"
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text=f"🔁 Снова: {last_city}", callback_data=f"show:all:{last_city[:40]}")
         ]])
-        await message.answer(text, link_preview_options=LinkPreviewOptions(is_disabled=True))
-        await message.answer("Или отправьте геопозицию:", reply_markup=LOCATION_KB)
-        await message.answer("Либо повторите прошлый город:", reply_markup=kb)
+        await message.answer(text, reply_markup=kb, link_preview_options=LinkPreviewOptions(is_disabled=True))
         return
 
-    await message.answer(text, reply_markup=kb, link_preview_options=LinkPreviewOptions(is_disabled=True))
+    await message.answer(text, link_preview_options=LinkPreviewOptions(is_disabled=True))
 
 
 @dp.message(Command("help"))
@@ -284,7 +274,7 @@ async def cmd_help(message: Message):
     _track(message)
     await message.answer(
         "📖 <b>Справка</b>\n\n"
-        "Напишите название города или отправьте 📍 геопозицию — выберите режим:\n"
+        "Напишите название города — выберите режим:\n"
         "📋 <b>Все АЗС</b> — полный список\n"
         "⛽ <b>Только с топливом</b> — отфильтрованный список\n\n"
         "<code>/subscribe Город</code> — получать уведомление, когда в городе появится топливо\n"
@@ -380,27 +370,6 @@ async def cmd_mysubs(message: Message):
     for s in subs:
         lines.append(f"• {s['city']}")
     await message.answer("\n".join(lines))
-
-
-# ─── geolocation ──────────────────────────────────────────────────────────────
-
-@dp.message(IS_PRIVATE & F.location)
-async def msg_location(message: Message):
-    _track(message)
-    loc = message.location
-    msg = await message.answer(
-        "⏳ Определяю город...", reply_markup=ReplyKeyboardRemove()
-    )
-    geo = await reverse_geocode(loc.latitude, loc.longitude)
-    if not geo or not geo[2]:
-        await msg.edit_text("❌ Не удалось определить город по координатам. Напишите название вручную.")
-        return
-    _, _, city = geo
-    city_safe = city[:40]
-    await msg.edit_text(
-        f"🏙 <b>{city}</b>\n\nКакой список показать?",
-        reply_markup=_mode_kb(city_safe),
-    )
 
 
 # ─── plain text в личке → меню выбора режима ────────────────────────────────
