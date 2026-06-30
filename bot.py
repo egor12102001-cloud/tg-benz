@@ -51,7 +51,8 @@ def _fmt_station(s: Station, idx: int) -> str:
     label = STATUS_LABEL.get(s.status, "Неизвестно")
     lines = [f"{emoji} <b>{idx}. {s.name or s.brand or 'АЗС'}</b> — {label}"]
     if s.addr:
-        lines.append(f"   📍 {s.addr}")
+        nav_url = f"https://yandex.ru/maps/?rtext=~{s.lat},{s.lon}&rtt=auto"
+        lines.append(f"   📍 <a href=\"{nav_url}\">{s.addr}</a>")
     lines.append(f"   📏 {s.distance_km:.1f} км")
     if s.detail:
         lines.append(f"   ⛽ {s.detail}")
