@@ -8,12 +8,17 @@ Returns JSON with stations list and summary.
 No auth, no Playwright needed — pure HTTP.
 """
 import aiohttp
+import re
 import ssl
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
 API_URL = "https://gdebenz.ru/api/nearby"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+NOMINATIM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse"
+
+CACHE_TTL_SECONDS = 180  # 3 минуты
 
 STATUS_EMOJI = {
     "yes":   "✅",
@@ -56,6 +61,22 @@ class NearbyResult:
     stations: list[Station]
     updated: str
     error: Optional[str] = None
+
+
+def normalize_city(city_name: str) -> str:
+    """
+    Normalize a raw user input into a comparable city key:
+    strips whitespace, leading slash-commands, lowercases.
+    """
+    text = city_name.strip()
+    # Drop accidental leading command text like ": /fuel Александров"
+    text = re.sub(r"^[:\s]*\/\w+\s*", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text.lower()
+
+
+# In-memory cache: normalized_city -> (timestamp, NearbyResult)
+_cache: dict[str, tuple[float, "NearbyResult"]] = {}
 
 
 def _ssl_ctx() -> ssl.SSLContext:
@@ -115,6 +136,42 @@ async def geocode_city(city_name: str) -> Optional[tuple[float, float, str]]:
     return float(item["lat"]), float(item["lon"]), item.get("display_name", city_name)
 
 
+async def reverse_geocode(lat: float, lon: float) -> Optional[tuple[float, float, str]]:
+    """
+    Resolve coordinates → (lat, lon, city_display_name) using Nominatim reverse.
+    Returns None if not found.
+    """
+    params = {
+        "lat": lat, "lon": lon,
+        "format": "json",
+        "zoom": 10,
+        "addressdetails": 1,
+    }
+    nom_headers = {
+        "User-Agent": "tg-benz-bot/1.0 (fuel availability bot)",
+        "Accept-Language": "ru",
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                NOMINATIM_REVERSE_URL, params=params, headers=nom_headers,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                data = await resp.json(content_type=None)
+    except Exception:
+        return None
+
+    if not data or "address" not in data:
+        return None
+
+    addr = data["address"]
+    city = (
+        addr.get("city") or addr.get("town") or addr.get("village")
+        or addr.get("municipality") or addr.get("county") or data.get("display_name", "")
+    )
+    return lat, lon, city
+
+
 async def get_nearby_stations(
     lat: float, lon: float, radius_km: int = 20
 ) -> tuple[dict, list[dict]]:
@@ -158,8 +215,14 @@ def parse_stations(raw: list[dict]) -> list[Station]:
     return stations
 
 
-async def fetch_city_fuel(city_name: str, radius_km: int = 20) -> NearbyResult:
-    """Main entry point: city name → NearbyResult with stations."""
+async def fetch_city_fuel(city_name: str, radius_km: int = 20, use_cache: bool = True) -> NearbyResult:
+    """Main entry point: city name → NearbyResult with stations. Cached for CACHE_TTL_SECONDS."""
+
+    cache_key = f"{normalize_city(city_name)}:{radius_km}"
+    if use_cache:
+        cached = _cache.get(cache_key)
+        if cached and time.monotonic() - cached[0] < CACHE_TTL_SECONDS:
+            return cached[1]
 
     # 1. Geocode
     geo = await geocode_city(city_name)
@@ -184,9 +247,9 @@ async def fetch_city_fuel(city_name: str, radius_km: int = 20) -> NearbyResult:
         )
 
     stations = parse_stations(raw)
-    updated = ""
-    # updated field comes from raw API response — not in stations list
-    return NearbyResult(
+    result = NearbyResult(
         city=short_name, lat=lat, lon=lon, radius_km=radius_km,
         summary=summary, stations=stations, updated="",
     )
+    _cache[cache_key] = (time.monotonic(), result)
+    return result
