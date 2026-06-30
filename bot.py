@@ -1,246 +1,189 @@
 """
 Telegram bot for gdebenz.ru — показывает где есть бензин, цены и наличие по городам.
-
 Запуск: BOT_TOKEN=<token> python3 bot.py
 """
 import asyncio
 import logging
 import os
-import re
-from typing import Optional
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     BotCommand,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    LinkPreviewOptions,
     Message,
 )
 
-from scraper import CityFuelInfo, FuelStation, get_cities, get_fuel_info, search_city
+from scraper import CityFuelInfo, FuelStation, city_to_slug, get_cities, get_fuel_info
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-
 dp = Dispatcher(storage=MemoryStorage())
 
 
-class SearchState(StatesGroup):
-    waiting_for_city = State()
+# ─── formatting ──────────────────────────────────────────────────────────────
 
-
-# ─── helpers ────────────────────────────────────────────────────────────────
-
-def _format_station(s: FuelStation) -> str:
-    lines = [f"<b>{s.name}</b>"]
+def _fmt_station(s: FuelStation, idx: int) -> str:
+    lines = [f"<b>{idx}. {s.name}</b>" if s.name else f"<b>{idx}. АЗС</b>"]
     if s.address:
         lines.append(f"📍 {s.address}")
-    if s.status:
-        lines.append(f"ℹ️ {s.status}")
     if s.fuel_types:
-        lines.append("⛽ Топливо:")
-        for fuel, price in s.fuel_types.items():
-            lines.append(f"  • {fuel}: {price} ₽/л")
+        for fuel, info in s.fuel_types.items():
+            lines.append(f"  ⛽ {fuel}: {info}")
+    if s.updated:
+        lines.append(f"  🕐 {s.updated}")
     return "\n".join(lines)
 
 
-def _format_city_info(info: CityFuelInfo) -> str:
-    if info.error:
-        return f"❌ Ошибка при получении данных: {info.error}"
+def _fmt_city(info: CityFuelInfo) -> list[str]:
+    """Split city result into chunks ≤4000 chars (Telegram limit)."""
+    if info.error and not info.stations:
+        return [f"❌ {info.error}"]
 
-    header = f"🏙 <b>{info.city}</b>\n"
+    header = (
+        f"🏙 <b>{info.city}</b>\n"
+        f"Источник: gdebenz.ru\n"
+        f"Найдено АЗС: <b>{info.total or len(info.stations)}</b>"
+    )
+
     if not info.stations:
-        return header + "\nНет данных о заправках. Возможно, сайт временно недоступен."
+        return [header + "\n\nДанных о заправках пока нет — попробуйте позже."]
 
-    parts = [header, f"Найдено заправок: <b>{len(info.stations)}</b>\n"]
-    for i, station in enumerate(info.stations[:20], 1):
-        parts.append(f"━━━━━━━━━━\n{_format_station(station)}")
-    if len(info.stations) > 20:
-        parts.append(f"\n…и ещё {len(info.stations) - 20} заправок")
-    return "\n".join(parts)
+    chunks: list[str] = []
+    current = header + "\n"
+    for i, st in enumerate(info.stations, 1):
+        block = "\n━━━━━━━━━━\n" + _fmt_station(st, i)
+        if len(current) + len(block) > 3800:
+            chunks.append(current)
+            current = f"<b>{info.city}</b> (продолжение)\n"
+        current += block
+    chunks.append(current)
+    return chunks
 
 
-def _cities_keyboard(cities: list[dict], page: int = 0) -> InlineKeyboardMarkup:
+def _cities_kb(cities: list[dict], page: int = 0) -> InlineKeyboardMarkup:
     page_size = 8
     start = page * page_size
-    chunk = cities[start : start + page_size]
-
-    rows = []
-    for c in chunk:
-        rows.append([InlineKeyboardButton(text=c["name"], callback_data=f"city:{c['slug']}")])
-
+    chunk = cities[start: start + page_size]
+    rows = [[InlineKeyboardButton(text=c["name"], callback_data=f"city:{c['slug']}")] for c in chunk]
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="◀ Назад", callback_data=f"page:{page-1}"))
+        nav.append(InlineKeyboardButton(text="◀ Назад", callback_data=f"page:{page - 1}"))
     if start + page_size < len(cities):
-        nav.append(InlineKeyboardButton(text="Вперёд ▶", callback_data=f"page:{page+1}"))
+        nav.append(InlineKeyboardButton(text="Вперёд ▶", callback_data=f"page:{page + 1}"))
     if nav:
         rows.append(nav)
-
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _send_loading(message: Message, text: str = "⏳ Загружаю данные...") -> Message:
-    return await message.answer(text)
+async def _show_city(target: Message, city_name: str, slug: str | None = None):
+    """Load and display fuel info for a city."""
+    msg = await target.answer(f"⏳ Загружаю данные для <b>{city_name}</b>...\n(это может занять ~15 сек)")
+    try:
+        info = await get_fuel_info(slug or city_name)
+    except Exception as e:
+        log.exception("get_fuel_info failed")
+        await msg.edit_text(f"❌ Ошибка при загрузке: {e}")
+        return
+
+    chunks = _fmt_city(info)
+    await msg.edit_text(chunks[0])
+    for chunk in chunks[1:]:
+        await target.answer(chunk)
 
 
-# ─── handlers ───────────────────────────────────────────────────────────────
+# ─── handlers ────────────────────────────────────────────────────────────────
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    text = (
-        "👋 <b>Привет!</b> Я помогу найти информацию о наличии топлива и ценах на АЗС "
-        "из сайта <a href=\"https://gdebenz.ru\">gdebenz.ru</a>.\n\n"
-        "Команды:\n"
-        "• /city — выбрать город из списка\n"
-        "• /search &lt;название&gt; — найти город\n"
-        "• /help — справка"
+    await message.answer(
+        "👋 <b>Привет!</b> Я показываю наличие топлива и цены на АЗС из <b>gdebenz.ru</b>.\n\n"
+        "Просто напишите название города — например:\n"
+        "<code>Москва</code>\n"
+        "<code>Краснодар</code>\n"
+        "<code>Ростов-на-Дону</code>\n\n"
+        "Или используйте команды:\n"
+        "• /city — список городов\n"
+        "• /help — справка",
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
-    await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
 
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
-    text = (
+    await message.answer(
         "📖 <b>Справка</b>\n\n"
-        "/city — показать список городов\n"
-        "/search &lt;город&gt; — поиск города по названию\n"
-        "  Пример: <code>/search Москва</code>\n\n"
-        "После выбора города я покажу:\n"
-        "• Список АЗС\n"
-        "• Доступные виды топлива\n"
-        "• Цены за литр\n"
-        "• Адреса заправок"
+        "Просто напишите <b>название города</b> — бот сразу покажет данные.\n\n"
+        "Команды:\n"
+        "/city — список всех городов с кнопками\n"
+        "/help — эта справка\n\n"
+        "Данные берутся с <b>gdebenz.ru</b> в реальном времени.\n"
+        "Загрузка занимает ~10–20 секунд (открывается браузер).",
     )
-    await message.answer(text, parse_mode="HTML")
 
 
 @dp.message(Command("city"))
 async def cmd_city(message: Message, state: FSMContext):
     await state.clear()
-    loading = await _send_loading(message, "⏳ Загружаю список городов...")
+    msg = await message.answer("⏳ Загружаю список городов...")
     try:
         cities = await get_cities()
     except Exception as e:
         log.error("get_cities failed: %s", e)
-        await loading.edit_text(f"❌ Не удалось загрузить список городов: {e}")
+        await msg.edit_text(f"❌ Не удалось загрузить список городов: {e}")
         return
 
     if not cities:
-        await loading.edit_text(
-            "❌ Не удалось получить список городов с сайта.\n"
-            "Попробуйте /search &lt;название города&gt;",
-            parse_mode="HTML",
+        await msg.edit_text(
+            "ℹ️ Сайт не отдаёт список городов напрямую.\n\n"
+            "Напишите название города прямо в чат — например:\n"
+            "<code>Москва</code>"
         )
         return
 
     await state.update_data(cities=cities)
-    await loading.edit_text(
+    await msg.edit_text(
         f"🏙 Выберите город ({len(cities)} доступно):",
-        reply_markup=_cities_keyboard(cities, 0),
+        reply_markup=_cities_kb(cities, 0),
     )
 
 
-@dp.message(Command("search"))
-async def cmd_search(message: Message, state: FSMContext):
-    await state.clear()
-    args = (message.text or "").split(maxsplit=1)
-    if len(args) < 2 or not args[1].strip():
-        await message.answer(
-            "Укажите название города. Пример:\n<code>/search Москва</code>",
-            parse_mode="HTML",
-        )
-        return
-
-    query = args[1].strip()
-    loading = await _send_loading(message, f"🔍 Ищу <b>{query}</b>...")
-    try:
-        results = await search_city(query)
-    except Exception as e:
-        log.error("search_city failed: %s", e)
-        await loading.edit_text(f"❌ Ошибка поиска: {e}")
-        return
-
-    if not results:
-        await loading.edit_text(
-            f"❌ Город <b>{query}</b> не найден.\n\nПопробуйте /city для полного списка.",
-            parse_mode="HTML",
-        )
-        return
-
-    if len(results) == 1:
-        await loading.edit_text(
-            f"✅ Нашёл: <b>{results[0]['name']}</b>. Загружаю данные...",
-            parse_mode="HTML",
-        )
-        info = await get_fuel_info(results[0]["slug"])
-        await loading.edit_text(_format_city_info(info), parse_mode="HTML")
-        return
-
-    await state.update_data(cities=results)
-    await loading.edit_text(
-        f"Найдено городов: {len(results)}. Выберите нужный:",
-        reply_markup=_cities_keyboard(results, 0),
-    )
-
-
-# Allow plain text input as city search
+# Plain text → city search
 @dp.message(F.text & ~F.text.startswith("/"))
 async def msg_text(message: Message, state: FSMContext):
-    query = (message.text or "").strip()
-    if not query:
+    city_name = (message.text or "").strip()
+    if not city_name:
         return
-
-    loading = await message.answer(f"🔍 Ищу <b>{query}</b>...", parse_mode="HTML")
-    try:
-        results = await search_city(query)
-    except Exception as e:
-        await loading.edit_text(f"❌ Ошибка: {e}")
-        return
-
-    if not results:
-        await loading.edit_text(
-            f"❌ Город <b>{query}</b> не найден.\nПопробуйте /city для полного списка.",
-            parse_mode="HTML",
-        )
-        return
-
-    if len(results) == 1:
-        await loading.edit_text("⏳ Загружаю данные о топливе...")
-        info = await get_fuel_info(results[0]["slug"])
-        await loading.edit_text(_format_city_info(info), parse_mode="HTML")
-        return
-
-    await state.update_data(cities=results)
-    await loading.edit_text(
-        f"Найдено городов: {len(results)}. Выберите нужный:",
-        reply_markup=_cities_keyboard(results, 0),
-    )
+    await _show_city(message, city_name)
 
 
-# ─── callback handlers ───────────────────────────────────────────────────────
+# ─── callbacks ────────────────────────────────────────────────────────────────
 
 @dp.callback_query(F.data.startswith("city:"))
-async def cb_city(call: CallbackQuery, state: FSMContext):
+async def cb_city(call: CallbackQuery):
     slug = call.data.split(":", 1)[1]
     await call.answer()
-    await call.message.edit_text(f"⏳ Загружаю данные для <b>{slug}</b>...", parse_mode="HTML")
+    await call.message.edit_text(f"⏳ Загружаю данные...\n(это может занять ~15 сек)")
     try:
         info = await get_fuel_info(slug)
     except Exception as e:
-        log.error("get_fuel_info(%s) failed: %s", slug, e)
+        log.exception("get_fuel_info failed for slug=%s", slug)
         await call.message.edit_text(f"❌ Ошибка: {e}")
         return
-    await call.message.edit_text(_format_city_info(info), parse_mode="HTML")
+
+    chunks = _fmt_city(info)
+    await call.message.edit_text(chunks[0])
+    for chunk in chunks[1:]:
+        await call.message.answer(chunk)
 
 
 @dp.callback_query(F.data.startswith("page:"))
@@ -252,10 +195,10 @@ async def cb_page(call: CallbackQuery, state: FSMContext):
     if not cities:
         await call.message.edit_text("❌ Список городов устарел. Запустите /city снова.")
         return
-    await call.message.edit_reply_markup(reply_markup=_cities_keyboard(cities, page))
+    await call.message.edit_reply_markup(reply_markup=_cities_kb(cities, page))
 
 
-# ─── main ────────────────────────────────────────────────────────────────────
+# ─── main ─────────────────────────────────────────────────────────────────────
 
 async def main():
     if not BOT_TOKEN:
@@ -264,8 +207,7 @@ async def main():
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
     await bot.set_my_commands([
         BotCommand(command="start", description="Начало работы"),
-        BotCommand(command="city", description="Выбрать город из списка"),
-        BotCommand(command="search", description="Найти город по названию"),
+        BotCommand(command="city", description="Список городов"),
         BotCommand(command="help", description="Справка"),
     ])
     log.info("Bot started")
