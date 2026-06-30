@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Any
 
 BASE_URL = "https://gdebenz.ru"
-CHROMIUM_PATH = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
+CHROMIUM_PATH = None  # None = Playwright finds Chromium automatically
 
 # Fuel type labels
 FUEL_LABELS = {
@@ -64,17 +64,15 @@ class CityFuelInfo:
 # ─── Playwright helpers ──────────────────────────────────────────────────────
 
 def _launch_kwargs() -> dict:
-    return {
-        "executable_path": CHROMIUM_PATH,
-        "headless": True,
-        "args": [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--no-proxy-server",
-            "--ignore-certificate-errors",
-        ],
-    }
+    kwargs: dict = {"headless": True}
+    if CHROMIUM_PATH:
+        kwargs["executable_path"] = CHROMIUM_PATH
+    kwargs["args"] = [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+    ]
+    return kwargs
 
 
 async def _intercept_api(url: str, timeout: int = 30000) -> tuple[str, list[dict]]:
