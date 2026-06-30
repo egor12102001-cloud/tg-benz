@@ -50,10 +50,9 @@ def _fmt_station(s: Station, idx: int) -> str:
     emoji = STATUS_EMOJI.get(s.status, "❓")
     label = STATUS_LABEL.get(s.status, "Неизвестно")
     lines = [f"{emoji} <b>{idx}. {s.name or s.brand or 'АЗС'}</b> — {label}"]
-    if s.addr:
-        nav_url = f"https://yandex.ru/maps/?rtext=~{s.lat},{s.lon}&rtt=auto"
-        lines.append(f"   📍 <a href=\"{nav_url}\">{s.addr}</a>")
-    lines.append(f"   📏 {s.distance_km:.1f} км")
+    nav_url = f"https://yandex.ru/maps/?rtext=~{s.lat},{s.lon}&rtt=auto"
+    addr_text = s.addr if s.addr else "Открыть на карте"
+    lines.append(f"   📍 <a href=\"{nav_url}\">{addr_text}</a> · {s.distance_km:.1f} км")
     if s.detail:
         lines.append(f"   ⛽ {s.detail}")
     if s.last_at:
