@@ -23,7 +23,10 @@ from db import (
     get_stats, get_user, get_user_by_username, init_db,
     is_admin, list_admins, log_query, set_role, upsert_user,
 )
-from scraper import NearbyResult, Station, STATUS_EMOJI, STATUS_LABEL, fetch_city_fuel
+from scraper import (
+    NearbyResult, Station, STATUS_EMOJI, STATUS_LABEL,
+    fetch_city_fuel, geocode_city, get_nearby_stations,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -344,6 +347,39 @@ async def cmd_removeadmin(message: Message):
     tag = _user_tag(user["first_name"], user["last_name"], user["username"])
     log.info("Admin removed: %s (id=%s) by %s", tag, user_id, message.from_user.id)
     await message.answer(f"✅ Права администратора у {tag} сняты.")
+
+
+# ─── /rawstation (admin debug) ───────────────────────────────────────────────
+
+@dp.message(Command("rawstation"))
+async def cmd_rawstation(message: Message):
+    _track(message)
+    if not _require_admin(message):
+        await message.answer("⛔ Доступ только для администраторов.")
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    city = parts[1].strip() if len(parts) > 1 else "Александров"
+    msg = await message.answer(f"⏳ Получаю сырые данные для {city}...")
+    try:
+        geo = await geocode_city(city)
+        if not geo:
+            await msg.edit_text("❌ Город не найден.")
+            return
+        lat, lon, _ = geo
+        _, raw = await get_nearby_stations(lat, lon, 20)
+        if not raw:
+            await msg.edit_text("Станций не найдено.")
+            return
+        import json
+        text = json.dumps(raw[0], ensure_ascii=False, indent=2)
+        for i in range(0, len(text), 3800):
+            chunk = f"<pre>{text[i:i+3800]}</pre>"
+            if i == 0:
+                await msg.edit_text(chunk, parse_mode="HTML")
+            else:
+                await message.answer(chunk, parse_mode="HTML")
+    except Exception as e:
+        await msg.edit_text(f"❌ Ошибка: {e}")
 
 
 # ─── plain text (личка) ───────────────────────────────────────────────────────
