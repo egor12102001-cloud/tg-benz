@@ -33,6 +33,21 @@ from scraper import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
+MSK = timezone(timedelta(hours=3))
+
+
+def _to_msk(iso_str: str, fmt: str = "%d.%m %H:%M") -> str:
+    """Convert a UTC ISO timestamp (from DB or API) to a Moscow-time string."""
+    if not iso_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(MSK).strftime(fmt)
+    except ValueError:
+        return iso_str
+
 BOT_TOKEN  = os.getenv("BOT_TOKEN", "")
 _raw_admin = os.getenv("ADMIN_IDS", "")
 SEED_ADMINS: set[int] = {int(x) for x in _raw_admin.split(",") if x.strip().isdigit()}
@@ -95,12 +110,7 @@ def _fmt_station(s: Station, idx: int) -> str:
     if s.detail:
         lines.append(f"   ⛽ {s.detail}")
     if s.last_at:
-        try:
-            MSK = timezone(timedelta(hours=3))
-            dt = datetime.strptime(s.last_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-            lines.append(f"   🕐 {dt.astimezone(MSK).strftime('%d.%m %H:%M')} МСК")
-        except ValueError:
-            lines.append(f"   🕐 {s.last_at}")
+        lines.append(f"   🕐 {_to_msk(s.last_at.replace(' ', 'T'))} МСК")
     return "\n".join(lines)
 
 
@@ -123,7 +133,6 @@ def _fmt_result(result: NearbyResult, only_available: bool = False) -> list[str]
 
     summary_str = _fmt_summary(result.summary)
     mode_label = " (только с топливом)" if only_available else ""
-    MSK = timezone(timedelta(hours=3))
     updated_at = datetime.now(MSK).strftime("%H:%M МСК")
     header = (
         f"🏙 <b>{result.city}</b> — АЗС в радиусе {result.radius_km} км{mode_label}\n"
@@ -165,7 +174,7 @@ def _fmt_stats(s: dict) -> list[str]:
         for r in s["recent"]:
             tag = _user_tag(r["first_name"], r["last_name"], r["username"])
             ok  = "✅" if r["success"] else "❌"
-            ts  = r["created_at"][:16].replace("T", " ")
+            ts  = _to_msk(r["created_at"])
             st  = f" ({r['stations']} АЗС)" if r["stations"] is not None else ""
             lines.append(f"  {ok} {tag} → <b>{r['city']}</b>{st} [{r['chat_type']}] {ts}")
 
@@ -179,7 +188,7 @@ def _fmt_stats(s: dict) -> list[str]:
             total = u["total_queries"] or 0
             ok    = u["ok"] or 0
             err   = u["err"] or 0
-            seen  = (u["last_seen"] or "")[:10]
+            seen  = _to_msk(u["last_seen"], "%d.%m.%Y")
             ulines.append(
                 f"{role} <b>{tag}</b>\n"
                 f"   ID: <code>{uid}</code> | запросов: {total} (✅{ok}/❌{err}) | был: {seen}"
@@ -373,7 +382,7 @@ async def cmd_admins(message: Message):
     lines = ["👑 <b>Администраторы:</b>\n"]
     for a in admins:
         tag   = _user_tag(a["first_name"], a["last_name"], a["username"])
-        since = (a["first_seen"] or "")[:10]
+        since = _to_msk(a["first_seen"], "%d.%m.%Y")
         lines.append(f"• {tag}\n  ID: <code>{a['user_id']}</code> | с {since}")
     await message.answer("\n".join(lines), parse_mode="HTML")
 
