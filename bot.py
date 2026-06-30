@@ -1,7 +1,10 @@
 """
 Telegram bot for gdebenz.ru — показывает где есть бензин по городам России.
 Работает в личных сообщениях и в групповых чатах.
-Запуск: BOT_TOKEN=<token> ADMIN_IDS=123456,789012 python3 bot.py
+
+Переменные окружения:
+  BOT_TOKEN   — токен бота (обязательно)
+  ADMIN_IDS   — начальные администраторы через запятую: 123456,789012
 """
 import asyncio
 import logging
@@ -16,23 +19,29 @@ from aiogram.types import (
     Message, LinkPreviewOptions,
 )
 
-from db import get_stats, init_db, log_query, upsert_user
+from db import (
+    get_stats, get_user, get_user_by_username, init_db,
+    is_admin, list_admins, log_query, set_role, upsert_user,
+)
 from scraper import NearbyResult, Station, STATUS_EMOJI, STATUS_LABEL, fetch_city_fuel
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-_raw_admins = os.getenv("ADMIN_IDS", "")
-ADMIN_IDS: set[int] = {int(x) for x in _raw_admins.split(",") if x.strip().isdigit()}
+BOT_TOKEN  = os.getenv("BOT_TOKEN", "")
+_raw_admin = os.getenv("ADMIN_IDS", "")
+SEED_ADMINS: set[int] = {int(x) for x in _raw_admin.split(",") if x.strip().isdigit()}
 
 dp = Dispatcher()
-
 IS_PRIVATE = F.chat.type == ChatType.PRIVATE
-IS_GROUP   = F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP})
 
 
-# ─── formatting ──────────────────────────────────────────────────────────────
+# ─── formatting helpers ───────────────────────────────────────────────────────
+
+def _user_tag(first: str | None, last: str | None, username: str | None) -> str:
+    name = " ".join(p for p in [first, last] if p) or "Без имени"
+    return f"{name} (@{username})" if username else name
+
 
 def _fmt_station(s: Station, idx: int) -> str:
     emoji = STATUS_EMOJI.get(s.status, "❓")
@@ -82,15 +91,14 @@ def _fmt_result(result: NearbyResult) -> list[str]:
     return chunks
 
 
-def _fmt_stats(s: dict) -> str:
+def _fmt_stats(s: dict) -> list[str]:
     lines = ["📊 <b>Статистика бота</b>\n"]
-
     lines.append(
-        f"👥 Всего пользователей: <b>{s['total_users']}</b>\n"
-        f"🔍 Всего запросов: <b>{s['total_queries']}</b> "
+        f"👥 Пользователей: <b>{s['total_users']}</b>\n"
+        f"🔍 Запросов всего: <b>{s['total_queries']}</b> "
         f"(✅{s['success_count']} / ❌{s['error_count']})\n"
-        f"📅 Сегодня: запросов <b>{s['today_queries']}</b>, "
-        f"уникальных пользователей <b>{s['today_users']}</b>"
+        f"📅 Сегодня: <b>{s['today_queries']}</b> запросов, "
+        f"<b>{s['today_users']}</b> уникальных"
     )
 
     if s["top_cities"]:
@@ -98,22 +106,35 @@ def _fmt_stats(s: dict) -> str:
         for i, c in enumerate(s["top_cities"], 1):
             lines.append(f"  {i}. {c['city']} — {c['cnt']} раз")
 
-    if s["top_users"]:
-        lines.append("\n🙋 <b>Топ пользователей:</b>")
-        for i, u in enumerate(s["top_users"], 1):
-            name = u["first_name"] or ""
-            uname = f" (@{u['username']})" if u["username"] else ""
-            lines.append(f"  {i}. {name}{uname} — {u['cnt']} запросов")
-
     if s["recent"]:
         lines.append("\n🕐 <b>Последние запросы:</b>")
         for r in s["recent"]:
-            name = r["first_name"] or "?"
-            status = "✅" if r["success"] else "❌"
-            ts = r["created_at"][:16].replace("T", " ")
-            lines.append(f"  {status} {name} → {r['city']} [{r['chat_type']}] {ts}")
+            tag = _user_tag(r["first_name"], r["last_name"], r["username"])
+            ok  = "✅" if r["success"] else "❌"
+            ts  = r["created_at"][:16].replace("T", " ")
+            st  = f" ({r['stations']} АЗС)" if r["stations"] is not None else ""
+            lines.append(f"  {ok} {tag} → <b>{r['city']}</b>{st} [{r['chat_type']}] {ts}")
 
-    return "\n".join(lines)
+    # Users section — may be long, split into separate chunk
+    chunks = ["\n".join(lines)]
+
+    if s["all_users"]:
+        ulines = ["👤 <b>Все пользователи:</b>\n"]
+        for u in s["all_users"]:
+            tag    = _user_tag(u["first_name"], u["last_name"], u["username"])
+            role   = "👑" if u["role"] == "admin" else "🙍"
+            uid    = u["user_id"]
+            total  = u["total_queries"] or 0
+            ok     = u["ok"] or 0
+            err    = u["err"] or 0
+            seen   = (u["last_seen"] or "")[:10]
+            ulines.append(
+                f"{role} <b>{tag}</b>\n"
+                f"   ID: <code>{uid}</code> | запросов: {total} (✅{ok}/❌{err}) | был: {seen}"
+            )
+        chunks.append("\n".join(ulines))
+
+    return chunks
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
@@ -121,15 +142,14 @@ def _fmt_stats(s: dict) -> str:
 def _track(message: Message) -> None:
     if message.from_user:
         u = message.from_user
-        upsert_user(u.id, u.username, u.first_name)
+        upsert_user(u.id, u.username, u.first_name, u.last_name)
 
 
 async def _show_city(message: Message, city_name: str) -> None:
     _track(message)
-    msg = await message.answer(f"⏳ Ищу АЗС в городе <b>{city_name}</b>...")
-
-    uid = message.from_user.id if message.from_user else 0
-    cid = message.chat.id
+    msg  = await message.answer(f"⏳ Ищу АЗС в городе <b>{city_name}</b>...")
+    uid  = message.from_user.id if message.from_user else 0
+    cid  = message.chat.id
     ctype = message.chat.type
 
     try:
@@ -152,7 +172,14 @@ async def _show_city(message: Message, city_name: str) -> None:
         await message.answer(chunk, parse_mode="HTML")
 
 
-# ─── handlers ────────────────────────────────────────────────────────────────
+def _require_admin(message: Message) -> bool:
+    uid = message.from_user.id if message.from_user else 0
+    if not is_admin(uid):
+        return False
+    return True
+
+
+# ─── /start, /help ───────────────────────────────────────────────────────────
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
@@ -160,20 +187,15 @@ async def cmd_start(message: Message):
     if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         await message.answer(
             "👋 <b>Привет!</b> Я показываю наличие топлива на АЗС.\n\n"
-            "Используйте команду:\n"
-            "<code>/fuel Александров</code>\n"
-            "<code>/fuel Москва</code>",
+            "Команда: <code>/fuel Александров</code>",
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
     else:
         await message.answer(
             "👋 <b>Привет!</b> Я показываю наличие топлива на АЗС из <b>gdebenz.ru</b>.\n\n"
             "Напишите название города:\n"
-            "<code>Александров</code>\n"
-            "<code>Москва</code>\n\n"
-            "Или используйте команду:\n"
-            "<code>/fuel Краснодар</code>\n\n"
-            "• /help — справка",
+            "<code>Александров</code>  или  <code>/fuel Москва</code>\n\n"
+            "/help — справка",
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
 
@@ -186,38 +208,146 @@ async def cmd_help(message: Message):
         "В группе: <code>/fuel Александров</code>\n"
         "В личке: просто напишите название города.\n\n"
         "Статусы:\n"
-        "✅ Есть — топливо в наличии\n"
-        "🟡 Очередь — есть, но очередь\n"
-        "🟠 Мало — заканчивается\n"
-        "❌ Нет — закончилось\n\n"
+        "✅ Есть  🟡 Очередь  🟠 Мало  ❌ Нет\n\n"
         "Данные берутся с <b>gdebenz.ru</b> в реальном времени.",
     )
 
+
+# ─── /fuel ───────────────────────────────────────────────────────────────────
 
 @dp.message(Command("fuel"))
 async def cmd_fuel(message: Message):
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
-        await message.answer(
-            "Укажите город после команды:\n"
-            "<code>/fuel Александров</code>"
-        )
+        await message.answer("Укажите город: <code>/fuel Александров</code>")
         return
     await _show_city(message, parts[1].strip())
 
 
+# ─── /stats ──────────────────────────────────────────────────────────────────
+
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
     _track(message)
-    uid = message.from_user.id if message.from_user else 0
-    if ADMIN_IDS and uid not in ADMIN_IDS:
-        await message.answer("⛔ Доступ запрещён.")
+    if not _require_admin(message):
+        await message.answer("⛔ Доступ только для администраторов.")
         return
-    s = get_stats()
-    await message.answer(_fmt_stats(s), parse_mode="HTML")
+    chunks = _fmt_stats(get_stats())
+    for chunk in chunks:
+        await message.answer(chunk, parse_mode="HTML")
 
 
-# Plain text в личке
+# ─── /admins ─────────────────────────────────────────────────────────────────
+
+@dp.message(Command("admins"))
+async def cmd_admins(message: Message):
+    _track(message)
+    if not _require_admin(message):
+        await message.answer("⛔ Доступ только для администраторов.")
+        return
+    admins = list_admins()
+    if not admins:
+        await message.answer("Администраторов нет.")
+        return
+    lines = ["👑 <b>Администраторы:</b>\n"]
+    for a in admins:
+        tag   = _user_tag(a["first_name"], a["last_name"], a["username"])
+        since = (a["first_seen"] or "")[:10]
+        lines.append(f"• {tag}\n  ID: <code>{a['user_id']}</code> | с {since}")
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+# ─── /addadmin ───────────────────────────────────────────────────────────────
+
+@dp.message(Command("addadmin"))
+async def cmd_addadmin(message: Message):
+    _track(message)
+    if not _require_admin(message):
+        await message.answer("⛔ Доступ только для администраторов.")
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer(
+            "Укажите ID или @username:\n"
+            "<code>/addadmin 123456789</code>\n"
+            "<code>/addadmin @username</code>"
+        )
+        return
+
+    arg = parts[1].strip()
+    if arg.lstrip("@").isdigit():
+        user_id = int(arg.lstrip("@"))
+        user = get_user(user_id)
+    else:
+        user = get_user_by_username(arg)
+        user_id = user["user_id"] if user else None
+
+    if not user:
+        await message.answer(
+            "❌ Пользователь не найден в базе.\n"
+            "Он должен сначала написать боту хотя бы один раз."
+        )
+        return
+
+    if user["role"] == "admin":
+        tag = _user_tag(user["first_name"], user["last_name"], user["username"])
+        await message.answer(f"ℹ️ {tag} уже администратор.")
+        return
+
+    set_role(user_id, "admin")
+    tag = _user_tag(user["first_name"], user["last_name"], user["username"])
+    log.info("Admin added: %s (id=%s) by %s", tag, user_id, message.from_user.id)
+    await message.answer(f"✅ {tag} теперь администратор.")
+
+
+# ─── /removeadmin ────────────────────────────────────────────────────────────
+
+@dp.message(Command("removeadmin"))
+async def cmd_removeadmin(message: Message):
+    _track(message)
+    if not _require_admin(message):
+        await message.answer("⛔ Доступ только для администраторов.")
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer(
+            "Укажите ID или @username:\n"
+            "<code>/removeadmin 123456789</code>"
+        )
+        return
+
+    arg = parts[1].strip()
+    if arg.lstrip("@").isdigit():
+        user_id = int(arg.lstrip("@"))
+        user = get_user(user_id)
+    else:
+        user = get_user_by_username(arg)
+        user_id = user["user_id"] if user else None
+
+    if not user:
+        await message.answer("❌ Пользователь не найден в базе.")
+        return
+
+    uid_self = message.from_user.id if message.from_user else 0
+    if user_id == uid_self:
+        await message.answer("❌ Нельзя снять права у самого себя.")
+        return
+
+    if user["role"] != "admin":
+        tag = _user_tag(user["first_name"], user["last_name"], user["username"])
+        await message.answer(f"ℹ️ {tag} и так не администратор.")
+        return
+
+    set_role(user_id, "user")
+    tag = _user_tag(user["first_name"], user["last_name"], user["username"])
+    log.info("Admin removed: %s (id=%s) by %s", tag, user_id, message.from_user.id)
+    await message.answer(f"✅ Права администратора у {tag} сняты.")
+
+
+# ─── plain text (личка) ───────────────────────────────────────────────────────
+
 @dp.message(IS_PRIVATE & F.text & ~F.text.startswith("/"))
 async def msg_text_private(message: Message):
     city_name = (message.text or "").strip()
@@ -233,16 +363,29 @@ async def main():
         raise ValueError("BOT_TOKEN environment variable is not set")
 
     init_db()
-    log.info("Database initialised. Admins: %s", ADMIN_IDS or "anyone")
+
+    # Promote seed admins from env on every startup
+    for uid in SEED_ADMINS:
+        user = get_user(uid)
+        if user and user["role"] != "admin":
+            set_role(uid, "admin")
+            log.info("Seed admin promoted: %s", uid)
+        elif not user:
+            log.warning("Seed admin %s not in DB yet — they need to /start first", uid)
+
+    log.info("Seed admins from env: %s", SEED_ADMINS or "none")
 
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 
     await bot.set_my_commands(
         [
-            BotCommand(command="start", description="Начало работы"),
-            BotCommand(command="fuel", description="АЗС по городу: /fuel Город"),
-            BotCommand(command="help", description="Справка"),
-            BotCommand(command="stats", description="Статистика (только для админов)"),
+            BotCommand(command="start",       description="Начало работы"),
+            BotCommand(command="fuel",        description="АЗС по городу: /fuel Город"),
+            BotCommand(command="help",        description="Справка"),
+            BotCommand(command="stats",       description="Статистика (админ)"),
+            BotCommand(command="admins",      description="Список администраторов (админ)"),
+            BotCommand(command="addadmin",    description="Назначить админа (админ)"),
+            BotCommand(command="removeadmin", description="Снять права админа (админ)"),
         ],
         scope=BotCommandScopeAllPrivateChats(),
     )
