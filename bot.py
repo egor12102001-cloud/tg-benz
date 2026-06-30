@@ -16,7 +16,7 @@ from aiogram.enums import ChatType
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats,
-    Message, LinkPreviewOptions,
+    BotCommandScopeChat, Message, LinkPreviewOptions,
 )
 
 from db import (
@@ -37,6 +37,25 @@ SEED_ADMINS: set[int] = {int(x) for x in _raw_admin.split(",") if x.strip().isdi
 
 dp = Dispatcher()
 IS_PRIVATE = F.chat.type == ChatType.PRIVATE
+IS_GROUP   = F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP})
+
+USER_COMMANDS = [
+    BotCommand(command="start",   description="Начало работы"),
+    BotCommand(command="fuel",    description="Все АЗС: /fuel Город"),
+    BotCommand(command="fuelnow", description="Только с топливом: /fuelnow Город"),
+    BotCommand(command="help",    description="Справка"),
+]
+ADMIN_COMMANDS = USER_COMMANDS + [
+    BotCommand(command="stats",       description="Статистика"),
+    BotCommand(command="admins",      description="Список администраторов"),
+    BotCommand(command="addadmin",    description="Назначить админа"),
+    BotCommand(command="removeadmin", description="Снять права админа"),
+]
+GROUP_COMMANDS = [
+    BotCommand(command="fuel",    description="Все АЗС: /fuel Город"),
+    BotCommand(command="fuelnow", description="Только с топливом: /fuelnow Город"),
+    BotCommand(command="help",    description="Справка"),
+]
 
 
 # ─── formatting helpers ───────────────────────────────────────────────────────
@@ -325,6 +344,10 @@ async def cmd_addadmin(message: Message):
     set_role(user_id, "admin")
     tag = _user_tag(user["first_name"], user["last_name"], user["username"])
     log.info("Admin added: %s (id=%s) by %s", tag, user_id, message.from_user.id)
+    try:
+        await message.bot.set_my_commands(ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=user_id))
+    except Exception:
+        pass
     await message.answer(f"✅ {tag} теперь администратор.")
 
 
@@ -370,6 +393,10 @@ async def cmd_removeadmin(message: Message):
     set_role(user_id, "user")
     tag = _user_tag(user["first_name"], user["last_name"], user["username"])
     log.info("Admin removed: %s (id=%s) by %s", tag, user_id, message.from_user.id)
+    try:
+        await message.bot.set_my_commands(USER_COMMANDS, scope=BotCommandScopeChat(chat_id=user_id))
+    except Exception:
+        pass
     await message.answer(f"✅ Права администратора у {tag} сняты.")
 
 
@@ -437,27 +464,18 @@ async def main():
 
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 
-    await bot.set_my_commands(
-        [
-            BotCommand(command="start",       description="Начало работы"),
-            BotCommand(command="fuel",        description="Все АЗС: /fuel Город"),
-            BotCommand(command="fuelnow",     description="Только с топливом: /fuelnow Город"),
-            BotCommand(command="help",        description="Справка"),
-            BotCommand(command="stats",       description="Статистика (админ)"),
-            BotCommand(command="admins",      description="Список администраторов (админ)"),
-            BotCommand(command="addadmin",    description="Назначить админа (админ)"),
-            BotCommand(command="removeadmin", description="Снять права админа (админ)"),
-        ],
-        scope=BotCommandScopeAllPrivateChats(),
-    )
-    await bot.set_my_commands(
-        [
-            BotCommand(command="fuel",    description="Все АЗС: /fuel Город"),
-            BotCommand(command="fuelnow", description="Только с топливом: /fuelnow Город"),
-            BotCommand(command="help",    description="Справка"),
-        ],
-        scope=BotCommandScopeAllGroupChats(),
-    )
+    # Базовые команды для всех личных чатов (без админских)
+    await bot.set_my_commands(USER_COMMANDS, scope=BotCommandScopeAllPrivateChats())
+    await bot.set_my_commands(GROUP_COMMANDS, scope=BotCommandScopeAllGroupChats())
+
+    # Установить расширенное меню каждому текущему админу персонально
+    for admin in list_admins():
+        try:
+            await bot.set_my_commands(
+                ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=admin["user_id"])
+            )
+        except Exception as e:
+            log.warning("Could not set commands for admin %s: %s", admin["user_id"], e)
 
     log.info("Bot started")
     await dp.start_polling(bot, skip_updates=True)
