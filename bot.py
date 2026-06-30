@@ -1,5 +1,6 @@
 """
 Telegram bot for gdebenz.ru — показывает где есть бензин по городам России.
+Работает в личных сообщениях и в групповых чатах.
 Запуск: BOT_TOKEN=<token> python3 bot.py
 """
 import asyncio
@@ -8,8 +9,9 @@ import os
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ChatType
 from aiogram.filters import Command, CommandStart
-from aiogram.types import BotCommand, Message, LinkPreviewOptions
+from aiogram.types import BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats, Message, LinkPreviewOptions
 
 from scraper import NearbyResult, Station, STATUS_EMOJI, STATUS_LABEL, fetch_city_fuel
 
@@ -18,6 +20,9 @@ log = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 dp = Dispatcher()
+
+IS_GROUP = F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP})
+IS_PRIVATE = F.chat.type == ChatType.PRIVATE
 
 
 def _fmt_station(s: Station, idx: int) -> str:
@@ -83,25 +88,37 @@ async def _show_city(message: Message, city_name: str):
         await message.answer(chunk, parse_mode="HTML")
 
 
+# ─── /start и /help ──────────────────────────────────────────────────────────
+
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    await message.answer(
-        "👋 <b>Привет!</b> Я показываю наличие топлива на АЗС из <b>gdebenz.ru</b>.\n\n"
-        "Просто напишите название города:\n"
-        "<code>Александров</code>\n"
-        "<code>Москва</code>\n"
-        "<code>Краснодар</code>\n\n"
-        "Команды:\n"
-        "• /help — справка",
-        link_preview_options=LinkPreviewOptions(is_disabled=True),
-    )
+    if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer(
+            "👋 <b>Привет!</b> Я показываю наличие топлива на АЗС.\n\n"
+            "Используйте команду:\n"
+            "<code>/fuel Александров</code>\n"
+            "<code>/fuel Москва</code>",
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+    else:
+        await message.answer(
+            "👋 <b>Привет!</b> Я показываю наличие топлива на АЗС из <b>gdebenz.ru</b>.\n\n"
+            "Напишите название города:\n"
+            "<code>Александров</code>\n"
+            "<code>Москва</code>\n\n"
+            "Или используйте команду:\n"
+            "<code>/fuel Краснодар</code>\n\n"
+            "• /help — справка",
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
 
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
     await message.answer(
         "📖 <b>Справка</b>\n\n"
-        "Напишите <b>название города</b> — бот покажет список АЗС с текущим статусом топлива.\n\n"
+        "В группе: <code>/fuel Александров</code>\n"
+        "В личке: просто напишите название города.\n\n"
         "Статусы:\n"
         "✅ Есть — топливо в наличии\n"
         "🟡 Очередь — есть, но очередь\n"
@@ -111,23 +128,57 @@ async def cmd_help(message: Message):
     )
 
 
-@dp.message(F.text & ~F.text.startswith("/"))
-async def msg_text(message: Message):
+# ─── /fuel <город> — работает везде ─────────────────────────────────────────
+
+@dp.message(Command("fuel"))
+async def cmd_fuel(message: Message):
+    # Текст после команды: "/fuel Александров" → "Александров"
+    city_name = (message.text or "").split(maxsplit=1)
+    if len(city_name) < 2 or not city_name[1].strip():
+        await message.answer(
+            "Укажите город после команды:\n"
+            "<code>/fuel Александров</code>"
+        )
+        return
+    await _show_city(message, city_name[1].strip())
+
+
+# ─── Личные сообщения: просто пишем город ────────────────────────────────────
+
+@dp.message(IS_PRIVATE & F.text & ~F.text.startswith("/"))
+async def msg_text_private(message: Message):
     city_name = (message.text or "").strip()
     if not city_name:
         return
     await _show_city(message, city_name)
 
 
+# ─── main ─────────────────────────────────────────────────────────────────────
+
 async def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN environment variable is not set")
 
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
-    await bot.set_my_commands([
-        BotCommand(command="start", description="Начало работы"),
-        BotCommand(command="help", description="Справка"),
-    ])
+
+    # Команды для личных чатов
+    await bot.set_my_commands(
+        [
+            BotCommand(command="start", description="Начало работы"),
+            BotCommand(command="fuel", description="АЗС по городу: /fuel Город"),
+            BotCommand(command="help", description="Справка"),
+        ],
+        scope=BotCommandScopeAllPrivateChats(),
+    )
+    # Команды для групп (только /fuel и /help — без /start)
+    await bot.set_my_commands(
+        [
+            BotCommand(command="fuel", description="АЗС по городу: /fuel Город"),
+            BotCommand(command="help", description="Справка"),
+        ],
+        scope=BotCommandScopeAllGroupChats(),
+    )
+
     log.info("Bot started")
     await dp.start_polling(bot, skip_updates=True)
 
