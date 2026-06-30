@@ -95,7 +95,12 @@ def _fmt_station(s: Station, idx: int) -> str:
     if s.detail:
         lines.append(f"   ⛽ {s.detail}")
     if s.last_at:
-        lines.append(f"   🕐 {s.last_at}")
+        try:
+            MSK = timezone(timedelta(hours=3))
+            dt = datetime.strptime(s.last_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            lines.append(f"   🕐 {dt.astimezone(MSK).strftime('%d.%m %H:%M')} МСК")
+        except ValueError:
+            lines.append(f"   🕐 {s.last_at}")
     return "\n".join(lines)
 
 
