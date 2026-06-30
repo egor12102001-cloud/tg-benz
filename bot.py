@@ -69,22 +69,28 @@ def _fmt_summary(summary: dict) -> str:
     return " ".join(parts) if parts else ""
 
 
-def _fmt_result(result: NearbyResult) -> list[str]:
+def _fmt_result(result: NearbyResult, only_available: bool = False) -> list[str]:
     if result.error:
         return [f"❌ {result.error}"]
 
+    stations = result.stations
+    if only_available:
+        stations = [s for s in stations if s.status in ("yes", "queue", "low")]
+
     summary_str = _fmt_summary(result.summary)
+    mode_label = " (только с топливом)" if only_available else ""
     header = (
-        f"🏙 <b>{result.city}</b> — АЗС в радиусе {result.radius_km} км\n"
+        f"🏙 <b>{result.city}</b> — АЗС в радиусе {result.radius_km} км{mode_label}\n"
         + (f"Итого: {summary_str}\n" if summary_str else "")
     )
 
-    if not result.stations:
-        return [header + "\nДанных о заправках нет — попробуйте позже."]
+    if not stations:
+        msg = "\nНет АЗС с топливом в наличии." if only_available else "\nДанных о заправках нет — попробуйте позже."
+        return [header + msg]
 
     chunks: list[str] = []
     current = header
-    for i, st in enumerate(result.stations, 1):
+    for i, st in enumerate(stations, 1):
         block = "\n\n" + _fmt_station(st, i)
         if len(current) + len(block) > 3800:
             chunks.append(current)
@@ -148,11 +154,11 @@ def _track(message: Message) -> None:
         upsert_user(u.id, u.username, u.first_name, u.last_name)
 
 
-async def _show_city(message: Message, city_name: str) -> None:
+async def _show_city(message: Message, city_name: str, only_available: bool = False) -> None:
     _track(message)
-    msg  = await message.answer(f"⏳ Ищу АЗС в городе <b>{city_name}</b>...")
-    uid  = message.from_user.id if message.from_user else 0
-    cid  = message.chat.id
+    msg   = await message.answer(f"⏳ Ищу АЗС в городе <b>{city_name}</b>...")
+    uid   = message.from_user.id if message.from_user else 0
+    cid   = message.chat.id
     ctype = message.chat.type
 
     try:
@@ -167,10 +173,10 @@ async def _show_city(message: Message, city_name: str) -> None:
         log_query(uid, cid, ctype, city_name, success=False, error=result.error)
     else:
         log_query(uid, cid, ctype, city_name, success=True, stations=len(result.stations))
-        log.info("user=%s city=%s stations=%d", uid, city_name, len(result.stations))
+        log.info("user=%s city=%s stations=%d only_available=%s", uid, city_name, len(result.stations), only_available)
 
     no_preview = LinkPreviewOptions(is_disabled=True)
-    chunks = _fmt_result(result)
+    chunks = _fmt_result(result, only_available=only_available)
     await msg.edit_text(chunks[0], parse_mode="HTML", link_preview_options=no_preview)
     for chunk in chunks[1:]:
         await message.answer(chunk, parse_mode="HTML", link_preview_options=no_preview)
@@ -191,14 +197,17 @@ async def cmd_start(message: Message):
     if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         await message.answer(
             "👋 <b>Привет!</b> Я показываю наличие топлива на АЗС.\n\n"
-            "Команда: <code>/fuel Александров</code>",
+            "<code>/fuel Александров</code> — все АЗС\n"
+            "<code>/fuelnow Александров</code> — только где есть топливо",
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
     else:
         await message.answer(
             "👋 <b>Привет!</b> Я показываю наличие топлива на АЗС из <b>gdebenz.ru</b>.\n\n"
-            "Напишите название города:\n"
-            "<code>Александров</code>  или  <code>/fuel Москва</code>\n\n"
+            "Напишите название города — покажу все АЗС.\n\n"
+            "Или используйте команды:\n"
+            "<code>/fuel Александров</code> — все АЗС\n"
+            "<code>/fuelnow Александров</code> — только где есть топливо\n\n"
             "/help — справка",
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
@@ -209,8 +218,9 @@ async def cmd_help(message: Message):
     _track(message)
     await message.answer(
         "📖 <b>Справка</b>\n\n"
-        "В группе: <code>/fuel Александров</code>\n"
-        "В личке: просто напишите название города.\n\n"
+        "<code>/fuel Город</code> — все АЗС в радиусе 20 км\n"
+        "<code>/fuelnow Город</code> — только где есть топливо\n\n"
+        "В личке можно просто написать название города.\n\n"
         "Статусы:\n"
         "✅ Есть  🟡 Очередь  🟠 Мало  ❌ Нет\n\n"
         "Данные берутся с <b>gdebenz.ru</b> в реальном времени.",
@@ -223,9 +233,22 @@ async def cmd_help(message: Message):
 async def cmd_fuel(message: Message):
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
-        await message.answer("Укажите город: <code>/fuel Александров</code>")
+        await message.answer(
+            "Укажите город:\n"
+            "<code>/fuel Александров</code> — все АЗС\n"
+            "<code>/fuelnow Александров</code> — только где есть топливо"
+        )
         return
-    await _show_city(message, parts[1].strip())
+    await _show_city(message, parts[1].strip(), only_available=False)
+
+
+@dp.message(Command("fuelnow"))
+async def cmd_fuelnow(message: Message):
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer("Укажите город: <code>/fuelnow Александров</code>")
+        return
+    await _show_city(message, parts[1].strip(), only_available=True)
 
 
 # ─── /stats ──────────────────────────────────────────────────────────────────
@@ -417,7 +440,8 @@ async def main():
     await bot.set_my_commands(
         [
             BotCommand(command="start",       description="Начало работы"),
-            BotCommand(command="fuel",        description="АЗС по городу: /fuel Город"),
+            BotCommand(command="fuel",        description="Все АЗС: /fuel Город"),
+            BotCommand(command="fuelnow",     description="Только с топливом: /fuelnow Город"),
             BotCommand(command="help",        description="Справка"),
             BotCommand(command="stats",       description="Статистика (админ)"),
             BotCommand(command="admins",      description="Список администраторов (админ)"),
@@ -428,8 +452,9 @@ async def main():
     )
     await bot.set_my_commands(
         [
-            BotCommand(command="fuel", description="АЗС по городу: /fuel Город"),
-            BotCommand(command="help", description="Справка"),
+            BotCommand(command="fuel",    description="Все АЗС: /fuel Город"),
+            BotCommand(command="fuelnow", description="Только с топливом: /fuelnow Город"),
+            BotCommand(command="help",    description="Справка"),
         ],
         scope=BotCommandScopeAllGroupChats(),
     )
