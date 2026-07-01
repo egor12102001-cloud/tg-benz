@@ -21,12 +21,14 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats,
     BotCommandScopeChat, BufferedInputFile, CallbackQuery, InlineKeyboardButton,
-    InlineKeyboardMarkup, Message, LinkPreviewOptions,
+    InlineKeyboardMarkup, InlineQuery, InlineQueryResultArticle, InputTextMessageContent,
+    Message, LinkPreviewOptions,
 )
 
 from db import (
-    get_stats, get_user, get_user_by_username, init_db, is_admin, list_admins,
-    list_all_users, log_query, set_last_city, set_role, upsert_user,
+    get_stats, get_user, get_user_by_username, get_user_top_cities, init_db,
+    is_admin, list_admins, list_all_users, log_query, set_last_city, set_role,
+    upsert_user,
 )
 from scraper import (
     NearbyResult, Station, STATUS_EMOJI, STATUS_LABEL,
@@ -60,8 +62,9 @@ dp = Dispatcher()
 IS_PRIVATE = F.chat.type == ChatType.PRIVATE
 
 USER_COMMANDS = [
-    BotCommand(command="start", description="Начало работы"),
-    BotCommand(command="help",  description="Справка"),
+    BotCommand(command="start",   description="Начало работы"),
+    BotCommand(command="history", description="Мои часто запрашиваемые города"),
+    BotCommand(command="help",    description="Справка"),
 ]
 ADMIN_COMMANDS = USER_COMMANDS + [
     BotCommand(command="stats",       description="Статистика"),
@@ -103,6 +106,19 @@ def _user_tag(first: str | None, last: str | None, username: str | None) -> str:
     return f"{name} (@{username})" if username else name
 
 
+STALE_AFTER = timedelta(hours=1)
+
+
+def _station_age(last_at: str) -> timedelta | None:
+    if not last_at:
+        return None
+    try:
+        dt = datetime.strptime(last_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - dt
+    except ValueError:
+        return None
+
+
 def _fmt_station(s: Station, idx: int) -> str:
     emoji = STATUS_EMOJI.get(s.status, "❓")
     label = STATUS_LABEL.get(s.status, "Неизвестно")
@@ -113,7 +129,9 @@ def _fmt_station(s: Station, idx: int) -> str:
     if s.detail:
         lines.append(f"   ⛽ {s.detail}")
     if s.last_at:
-        lines.append(f"   🕐 {_to_msk(s.last_at.replace(' ', 'T'))} МСК")
+        age = _station_age(s.last_at)
+        stale = " ⚠️ данные могли устареть" if age and age > STALE_AFTER else ""
+        lines.append(f"   🕐 {_to_msk(s.last_at.replace(' ', 'T'))} МСК{stale}")
     return "\n".join(lines)
 
 
@@ -262,6 +280,7 @@ async def cmd_help(message: Message):
         "📋 все АЗС или ⛽ только те, где есть топливо.\n\n"
         "<b>Статусы заправок:</b>\n"
         "✅ Есть   🟡 Очередь   🟠 Мало   ❌ Нет\n\n"
+        "<code>/history</code> — города, которые вы чаще всего проверяете\n\n"
         "<b>В группах</b> используйте команды:\n"
         "<code>/fuel Город</code> — все АЗС\n"
         "<code>/fuelnow Город</code> — только с топливом\n\n"
@@ -300,6 +319,27 @@ async def cmd_fuel(message: Message):
 @dp.message(Command("fuelnow"))
 async def cmd_fuelnow(message: Message):
     await _run_fuel_command(message, "now")
+
+
+# ─── /history ─────────────────────────────────────────────────────────────────
+
+@dp.message(Command("history"))
+async def cmd_history(message: Message):
+    _track(message)
+    uid = message.from_user.id if message.from_user else 0
+    cities = get_user_top_cities(uid)
+    if not cities:
+        await message.answer("У вас пока нет истории запросов. Напишите название города!")
+        return
+    lines = ["🏆 <b>Ваши города:</b>\n"]
+    for i, c in enumerate(cities, 1):
+        last = _to_msk(c["last_at"], "%d.%m")
+        lines.append(f"{i}. {c['city']} — {c['cnt']} раз (последний: {last})")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"🔁 {c['city']}", callback_data=f"show:all:{c['city'][:40]}")]
+        for c in cities[:5]
+    ])
+    await message.answer("\n".join(lines), reply_markup=kb)
 
 
 # ─── plain text в личке → меню выбора режима ────────────────────────────────
@@ -347,6 +387,78 @@ async def cb_show_or_refresh(call: CallbackQuery):
     )
     for chunk in chunks[1:]:
         await call.message.answer(chunk, parse_mode="HTML", link_preview_options=no_preview)
+
+
+# ─── inline mode ──────────────────────────────────────────────────────────────
+
+@dp.inline_query()
+async def inline_fuel(query: InlineQuery):
+    city = query.query.strip()
+    if not city:
+        await query.answer(
+            [InlineQueryResultArticle(
+                id="hint",
+                title="Введите название города",
+                description="Например: Александров",
+                input_message_content=InputTextMessageContent(
+                    message_text="Напишите боту в личку название города, чтобы получить список АЗС."
+                ),
+            )],
+            cache_time=60, is_personal=False,
+        )
+        return
+
+    if query.from_user:
+        upsert_user(query.from_user.id, query.from_user.username,
+                    query.from_user.first_name, query.from_user.last_name)
+
+    try:
+        result = await fetch_city_fuel(city)
+    except Exception as e:
+        log.exception("inline fetch failed city=%s", city)
+        await query.answer([], cache_time=5)
+        return
+
+    uid = query.from_user.id if query.from_user else 0
+    city_norm = normalize_city(city)
+    if result.error:
+        log_query(uid, uid, "inline", city, city_norm, success=False, error=result.error)
+        await query.answer(
+            [InlineQueryResultArticle(
+                id="error",
+                title=f"❌ {result.city} не найден",
+                description=result.error,
+                input_message_content=InputTextMessageContent(message_text=f"❌ {result.error}"),
+            )],
+            cache_time=30,
+        )
+        return
+
+    log_query(uid, uid, "inline", city, city_norm, success=True, stations=len(result.stations))
+    if uid:
+        set_last_city(uid, result.city)
+
+    available = [s for s in result.stations if s.status in ("yes", "queue", "low")]
+    summary_str = _fmt_summary(result.summary)
+
+    articles = []
+    for mode, label, desc in (
+        ("all", "📋 Все АЗС", f"{len(result.stations)} станций · {summary_str}"),
+        ("now", "⛽ Только с топливом", f"{len(available)} станций с топливом"),
+    ):
+        chunks = _fmt_result(result, only_available=(mode == "now"))
+        articles.append(InlineQueryResultArticle(
+            id=f"{mode}:{city_norm}",
+            title=f"{label} — {result.city}",
+            description=desc,
+            input_message_content=InputTextMessageContent(
+                message_text=chunks[0], parse_mode="HTML",
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+            ),
+            reply_markup=_refresh_kb(result.city, mode),
+        ))
+
+    await query.answer(articles, cache_time=120, is_personal=True)
 
 
 # ─── admin ────────────────────────────────────────────────────────────────────
