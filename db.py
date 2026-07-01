@@ -55,10 +55,19 @@ def init_db() -> None:
         cols = {r["name"] for r in con.execute("PRAGMA table_info(queries)")}
         if "city_norm" not in cols:
             con.execute("ALTER TABLE queries ADD COLUMN city_norm TEXT NOT NULL DEFAULT ''")
-            con.execute("UPDATE queries SET city_norm = LOWER(TRIM(city)) WHERE city_norm = ''")
 
         # 3. Indexes that depend on migrated columns.
         con.execute("CREATE INDEX IF NOT EXISTS queries_city_norm ON queries(city_norm)")
+
+        # 4. (Re)normalize city_norm in Python: SQLite's LOWER() only lowercases
+        #    ASCII, so Cyrillic city names like "Александров" were left
+        #    capitalized and split into separate groups from lowercase entries.
+        from scraper import normalize_city
+        rows = con.execute("SELECT id, city, city_norm FROM queries").fetchall()
+        for row in rows:
+            correct = normalize_city(row["city"])
+            if row["city_norm"] != correct:
+                con.execute("UPDATE queries SET city_norm = ? WHERE id = ?", (correct, row["id"]))
 
 
 # ─── users ───────────────────────────────────────────────────────────────────
