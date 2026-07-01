@@ -163,6 +163,23 @@ def log_query(
         """, (user_id, chat_id, chat_type, city, city_norm, int(success), error, stations, now))
 
 
+def get_user_top_cities(user_id: int, limit: int = 10) -> list[dict]:
+    """Cities a given user has queried most often, grouped by normalized name."""
+    with _connect() as con:
+        rows = con.execute("""
+            SELECT city_norm,
+                   (SELECT city FROM queries q2
+                    WHERE q2.city_norm = q.city_norm AND q2.user_id = ?
+                    GROUP BY city ORDER BY COUNT(*) DESC LIMIT 1) AS city,
+                   COUNT(*) as cnt,
+                   MAX(created_at) as last_at
+            FROM queries q
+            WHERE user_id = ? AND city_norm != ''
+            GROUP BY city_norm ORDER BY cnt DESC LIMIT ?
+        """, (user_id, user_id, limit)).fetchall()
+        return [dict(r) for r in rows]
+
+
 # ─── stats ───────────────────────────────────────────────────────────────────
 
 def get_stats() -> dict:
