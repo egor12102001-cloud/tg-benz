@@ -1,5 +1,5 @@
 """
-SQLite storage for users, roles, subscriptions, and query statistics.
+SQLite storage for users, roles, and query statistics.
 """
 import sqlite3
 from datetime import datetime, timezone
@@ -43,20 +43,8 @@ def init_db() -> None:
                 created_at    TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS subscriptions (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id     INTEGER NOT NULL,
-                chat_id     INTEGER NOT NULL,
-                city        TEXT NOT NULL,
-                city_norm   TEXT NOT NULL,
-                last_status TEXT,
-                created_at  TEXT NOT NULL,
-                UNIQUE(user_id, city_norm)
-            );
-
             CREATE INDEX IF NOT EXISTS queries_user    ON queries(user_id);
             CREATE INDEX IF NOT EXISTS queries_created ON queries(created_at);
-            CREATE INDEX IF NOT EXISTS subs_user       ON subscriptions(user_id);
         """)
 
         # 2. Migrate older DBs to the current column set.
@@ -166,49 +154,6 @@ def log_query(
         """, (user_id, chat_id, chat_type, city, city_norm, int(success), error, stations, now))
 
 
-# ─── subscriptions ───────────────────────────────────────────────────────────
-
-def add_subscription(user_id: int, chat_id: int, city: str, city_norm: str) -> bool:
-    now = datetime.now(timezone.utc).isoformat()
-    with _connect() as con:
-        try:
-            con.execute("""
-                INSERT INTO subscriptions (user_id, chat_id, city, city_norm, created_at)
-                VALUES (?, ?, ?, ?, ?)
-            """, (user_id, chat_id, city, city_norm, now))
-            return True
-        except sqlite3.IntegrityError:
-            return False
-
-
-def remove_subscription(user_id: int, city_norm: str) -> bool:
-    with _connect() as con:
-        cur = con.execute(
-            "DELETE FROM subscriptions WHERE user_id = ? AND city_norm = ?",
-            (user_id, city_norm),
-        )
-        return cur.rowcount > 0
-
-
-def list_subscriptions(user_id: int) -> list[dict]:
-    with _connect() as con:
-        rows = con.execute(
-            "SELECT * FROM subscriptions WHERE user_id = ? ORDER BY created_at", (user_id,)
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def all_subscriptions() -> list[dict]:
-    with _connect() as con:
-        rows = con.execute("SELECT * FROM subscriptions").fetchall()
-        return [dict(r) for r in rows]
-
-
-def update_subscription_status(sub_id: int, status: str) -> None:
-    with _connect() as con:
-        con.execute("UPDATE subscriptions SET last_status = ? WHERE id = ?", (status, sub_id))
-
-
 # ─── stats ───────────────────────────────────────────────────────────────────
 
 def get_stats() -> dict:
@@ -243,20 +188,12 @@ def get_stats() -> dict:
                    u.first_seen, u.last_seen,
                    COUNT(q.id) as total_queries,
                    SUM(CASE WHEN q.success=1 THEN 1 ELSE 0 END) as ok,
-                   SUM(CASE WHEN q.success=0 THEN 1 ELSE 0 END) as err
+                   SUM(CASE WHEN q.success=0 THEN 1 ELSE 0 END) as err,
+                   MAX(q.created_at) as last_query_at
             FROM users u
             LEFT JOIN queries q ON q.user_id = u.user_id
             GROUP BY u.user_id
             ORDER BY total_queries DESC
-        """).fetchall()
-
-        recent = con.execute("""
-            SELECT u.first_name, u.last_name, u.username, q.city,
-                   q.chat_type, q.success, q.stations, q.created_at
-            FROM queries q
-            LEFT JOIN users u ON u.user_id = q.user_id
-            ORDER BY q.created_at DESC
-            LIMIT 15
         """).fetchall()
 
     return {
@@ -268,5 +205,4 @@ def get_stats() -> dict:
         "today_users":   today_users,
         "top_cities":    [dict(r) for r in top_cities],
         "all_users":     [dict(r) for r in all_users],
-        "recent":        [dict(r) for r in recent],
     }
