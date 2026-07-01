@@ -25,9 +25,8 @@ from aiogram.types import (
 )
 
 from db import (
-    add_subscription, all_subscriptions, get_stats, get_user, get_user_by_username,
-    init_db, is_admin, list_admins, list_all_users, list_subscriptions, log_query,
-    remove_subscription, set_last_city, set_role, update_subscription_status, upsert_user,
+    get_stats, get_user, get_user_by_username, init_db, is_admin, list_admins,
+    list_all_users, log_query, set_last_city, set_role, upsert_user,
 )
 from scraper import (
     NearbyResult, Station, STATUS_EMOJI, STATUS_LABEL,
@@ -57,17 +56,12 @@ BOT_TOKEN  = os.getenv("BOT_TOKEN", "")
 _raw_admin = os.getenv("ADMIN_IDS", "")
 SEED_ADMINS: set[int] = {int(x) for x in _raw_admin.split(",") if x.strip().isdigit()}
 
-SUBSCRIPTION_CHECK_INTERVAL = 600  # 10 минут
-
 dp = Dispatcher()
 IS_PRIVATE = F.chat.type == ChatType.PRIVATE
 
 USER_COMMANDS = [
-    BotCommand(command="start",     description="Начало работы"),
-    BotCommand(command="subscribe", description="Подписаться на город"),
-    BotCommand(command="unsubscribe", description="Отписаться от города"),
-    BotCommand(command="mysubs",    description="Мои подписки"),
-    BotCommand(command="help",      description="Справка"),
+    BotCommand(command="start", description="Начало работы"),
+    BotCommand(command="help",  description="Справка"),
 ]
 ADMIN_COMMANDS = USER_COMMANDS + [
     BotCommand(command="stats",       description="Статистика"),
@@ -93,16 +87,13 @@ def _mode_kb(city: str) -> InlineKeyboardMarkup:
 
 
 def _refresh_kb(city: str, mode: str) -> InlineKeyboardMarkup:
-    rows = [[
+    return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="🔄 Обновить", callback_data=f"refresh:{mode}:{city}"),
         InlineKeyboardButton(
             text="⛽ Только с топливом" if mode == "all" else "📋 Все АЗС",
             callback_data=f"show:{'now' if mode == 'all' else 'all'}:{city}",
         ),
-    ], [
-        InlineKeyboardButton(text="🔔 Подписаться на обновления", callback_data=f"sub:{city}"),
-    ]]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    ]])
 
 
 # ─── formatting ──────────────────────────────────────────────────────────────
@@ -181,29 +172,20 @@ def _fmt_stats(s: dict) -> list[str]:
         lines.append("\n🏙 <b>Топ городов:</b>")
         for i, c in enumerate(s["top_cities"], 1):
             lines.append(f"  {i}. {c['city']} — {c['cnt']} раз")
-    if s["recent"]:
-        lines.append("\n🕐 <b>Последние запросы:</b>")
-        for r in s["recent"]:
-            tag = _user_tag(r["first_name"], r["last_name"], r["username"])
-            ok  = "✅" if r["success"] else "❌"
-            ts  = _to_msk(r["created_at"])
-            st  = f" ({r['stations']} АЗС)" if r["stations"] is not None else ""
-            lines.append(f"  {ok} {tag} → <b>{r['city']}</b>{st} [{r['chat_type']}] {ts}")
 
     chunks = ["\n".join(lines)]
     if s["all_users"]:
-        ulines = ["👤 <b>Все пользователи:</b>\n"]
+        ulines = ["👤 <b>Пользователи (по активности):</b>\n"]
         for u in s["all_users"]:
             tag   = _user_tag(u["first_name"], u["last_name"], u["username"])
             role  = "👑" if u["role"] == "admin" else "🙍"
-            uid   = u["user_id"]
             total = u["total_queries"] or 0
-            ok    = u["ok"] or 0
             err   = u["err"] or 0
-            seen  = _to_msk(u["last_seen"], "%d.%m.%Y")
+            last  = _to_msk(u["last_query_at"], "%d.%m %H:%M") if u["last_query_at"] else "—"
+            err_part = f", ❌{err}" if err else ""
             ulines.append(
-                f"{role} <b>{tag}</b>\n"
-                f"   ID: <code>{uid}</code> | запросов: {total} (✅{ok}/❌{err}) | был: {seen}"
+                f"{role} <b>{tag}</b> · ID <code>{u['user_id']}</code>\n"
+                f"   запросов: {total}{err_part} · последний: {last}"
             )
         chunks.append("\n".join(ulines))
     return chunks
@@ -280,10 +262,6 @@ async def cmd_help(message: Message):
         "📋 все АЗС или ⛽ только те, где есть топливо.\n\n"
         "<b>Статусы заправок:</b>\n"
         "✅ Есть   🟡 Очередь   🟠 Мало   ❌ Нет\n\n"
-        "<b>Подписка на город</b> — пришлю сообщение, как только появится топливо:\n"
-        "<code>/subscribe Город</code> — подписаться\n"
-        "<code>/unsubscribe Город</code> — отписаться\n"
-        "<code>/mysubs</code> — мои подписки\n\n"
         "<b>В группах</b> используйте команды:\n"
         "<code>/fuel Город</code> — все АЗС\n"
         "<code>/fuelnow Город</code> — только с топливом\n\n"
@@ -324,58 +302,6 @@ async def cmd_fuelnow(message: Message):
     await _run_fuel_command(message, "now")
 
 
-# ─── /subscribe, /unsubscribe, /mysubs ───────────────────────────────────────
-
-@dp.message(Command("subscribe"))
-async def cmd_subscribe(message: Message):
-    _track(message)
-    parts = (message.text or "").split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip():
-        await message.answer("Укажите город: <code>/subscribe Александров</code>")
-        return
-    city = parts[1].strip()
-    uid = message.from_user.id if message.from_user else 0
-    city_norm = normalize_city(city)
-    ok = add_subscription(uid, message.chat.id, city, city_norm)
-    if ok:
-        await message.answer(
-            f"🔔 Подписка оформлена на <b>{city}</b>.\n"
-            f"Напишу, когда статус топлива изменится (проверка каждые {SUBSCRIPTION_CHECK_INTERVAL // 60} мин)."
-        )
-    else:
-        await message.answer(f"ℹ️ Вы уже подписаны на <b>{city}</b>.")
-
-
-@dp.message(Command("unsubscribe"))
-async def cmd_unsubscribe(message: Message):
-    _track(message)
-    parts = (message.text or "").split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip():
-        await message.answer("Укажите город: <code>/unsubscribe Александров</code>")
-        return
-    city = parts[1].strip()
-    uid = message.from_user.id if message.from_user else 0
-    ok = remove_subscription(uid, normalize_city(city))
-    if ok:
-        await message.answer(f"🔕 Подписка на <b>{city}</b> отменена.")
-    else:
-        await message.answer(f"ℹ️ Подписки на <b>{city}</b> не найдено.")
-
-
-@dp.message(Command("mysubs"))
-async def cmd_mysubs(message: Message):
-    _track(message)
-    uid = message.from_user.id if message.from_user else 0
-    subs = list_subscriptions(uid)
-    if not subs:
-        await message.answer("У вас нет активных подписок. Оформить: <code>/subscribe Город</code>")
-        return
-    lines = ["🔔 <b>Ваши подписки:</b>\n"]
-    for s in subs:
-        lines.append(f"• {s['city']}")
-    await message.answer("\n".join(lines))
-
-
 # ─── plain text в личке → меню выбора режима ────────────────────────────────
 
 @dp.message(IS_PRIVATE & F.text & ~F.text.startswith("/"))
@@ -391,7 +317,7 @@ async def msg_text_private(message: Message):
     )
 
 
-# ─── callbacks: show, refresh, sub ───────────────────────────────────────────
+# ─── callbacks: show, refresh ─────────────────────────────────────────────────
 
 @dp.callback_query(F.data.startswith("show:") | F.data.startswith("refresh:"))
 async def cb_show_or_refresh(call: CallbackQuery):
@@ -421,15 +347,6 @@ async def cb_show_or_refresh(call: CallbackQuery):
     )
     for chunk in chunks[1:]:
         await call.message.answer(chunk, parse_mode="HTML", link_preview_options=no_preview)
-
-
-@dp.callback_query(F.data.startswith("sub:"))
-async def cb_subscribe(call: CallbackQuery):
-    city = call.data.split(":", 1)[1]
-    uid = call.from_user.id if call.from_user else 0
-    city_norm = normalize_city(city)
-    ok = add_subscription(uid, call.message.chat.id, city, city_norm)
-    await call.answer("🔔 Подписка оформлена!" if ok else "ℹ️ Вы уже подписаны.", show_alert=True)
 
 
 # ─── admin ────────────────────────────────────────────────────────────────────
@@ -620,46 +537,6 @@ async def cmd_rawstation(message: Message):
         await msg.edit_text(f"❌ Ошибка: {e}")
 
 
-# ─── background: subscription polling ────────────────────────────────────────
-
-async def _check_subscriptions(bot: Bot):
-    while True:
-        await asyncio.sleep(SUBSCRIPTION_CHECK_INTERVAL)
-        subs = all_subscriptions()
-        if not subs:
-            continue
-        log.info("Checking %d subscriptions", len(subs))
-        seen_cities: dict[str, NearbyResult] = {}
-        for sub in subs:
-            try:
-                if sub["city_norm"] not in seen_cities:
-                    seen_cities[sub["city_norm"]] = await fetch_city_fuel(sub["city"])
-                result = seen_cities[sub["city_norm"]]
-                if result.error:
-                    continue
-
-                available = [s for s in result.stations if s.status in ("yes", "queue", "low")]
-                new_status = "yes" if available else "no"
-
-                if sub["last_status"] is not None and sub["last_status"] != new_status:
-                    if new_status == "yes":
-                        text = (
-                            f"⛽ <b>{result.city}</b>: появилось топливо!\n"
-                            f"Доступно станций: {len(available)}\n"
-                            f"Проверьте: /fuelnow {result.city}"
-                        )
-                    else:
-                        text = f"⚠️ <b>{result.city}</b>: топливо закончилось на всех АЗС."
-                    try:
-                        await bot.send_message(sub["chat_id"], text)
-                    except Exception as e:
-                        log.warning("Could not notify sub %s: %s", sub["id"], e)
-
-                update_subscription_status(sub["id"], new_status)
-            except Exception:
-                log.exception("Subscription check failed for sub_id=%s", sub["id"])
-
-
 # ─── main ─────────────────────────────────────────────────────────────────────
 
 async def main():
@@ -688,8 +565,6 @@ async def main():
             await bot.set_my_commands(ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=admin["user_id"]))
         except Exception as e:
             log.warning("Could not set commands for admin %s: %s", admin["user_id"], e)
-
-    asyncio.create_task(_check_subscriptions(bot))
 
     log.info("Bot started")
     await dp.start_polling(bot, skip_updates=True)
