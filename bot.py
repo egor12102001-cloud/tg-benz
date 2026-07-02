@@ -27,7 +27,7 @@ from aiogram.types import (
 
 from db import (
     clear_user_history, get_stats, get_user, get_user_by_username,
-    get_user_top_cities, init_db, is_admin, list_admins, list_all_users,
+    init_db, is_admin, list_admins, list_all_users,
     log_query, set_last_city, set_role, upsert_user,
 )
 from scraper import (
@@ -63,8 +63,7 @@ IS_PRIVATE = F.chat.type == ChatType.PRIVATE
 
 USER_COMMANDS = [
     BotCommand(command="start",   description="Начало работы"),
-    BotCommand(command="history", description="Мои часто запрашиваемые города"),
-    BotCommand(command="clear",   description="Очистить мою историю запросов"),
+    BotCommand(command="clear",   description="Очистить мои сохранённые данные"),
     BotCommand(command="help",    description="Справка"),
     BotCommand(command="privacy", description="Данные и ответственность"),
 ]
@@ -293,8 +292,7 @@ async def cmd_help(message: Message):
         "📋 все АЗС или ⛽ только те, где есть топливо.\n\n"
         "<b>Статусы заправок:</b>\n"
         "✅ Есть   🟡 Очередь   🟠 Мало   ❌ Нет\n\n"
-        "/history — города, которые вы чаще всего проверяете\n"
-        "/clear — очистить сохранённую историю запросов\n\n"
+        "/clear — очистить мои сохранённые данные\n\n"
         "<b>В группах</b> используйте команды:\n"
         "/fuel Город — все АЗС\n"
         "/fuelnow Город — только с топливом\n\n"
@@ -354,27 +352,6 @@ async def cmd_fuelnow(message: Message):
     await _run_fuel_command(message, "now")
 
 
-# ─── /history ─────────────────────────────────────────────────────────────────
-
-@dp.message(Command("history"))
-async def cmd_history(message: Message):
-    _track(message)
-    uid = message.from_user.id if message.from_user else 0
-    cities = get_user_top_cities(uid)
-    if not cities:
-        await message.answer("У вас пока нет истории запросов. Напишите название города!")
-        return
-    lines = ["🏆 <b>Ваши города:</b>\n"]
-    for i, c in enumerate(cities, 1):
-        last = _to_msk(c["last_at"], "%d.%m")
-        lines.append(f"{i}. {c['city']} — {c['cnt']} раз (последний: {last})")
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"🔁 {c['city']}", callback_data=f"show:all:{c['city'][:40]}")]
-        for c in cities[:5]
-    ])
-    await message.answer("\n".join(lines), reply_markup=kb)
-
-
 # ─── /clear ───────────────────────────────────────────────────────────────────
 
 @dp.message(Command("clear"))
@@ -385,7 +362,7 @@ async def cmd_clear(message: Message):
         InlineKeyboardButton(text="Отмена", callback_data="clear:cancel"),
     ]])
     await message.answer(
-        "Очистить вашу сохранённую историю запросов (для /history и статистики)?",
+        "Очистить все ваши сохранённые данные (историю запросов)?",
         reply_markup=kb,
     )
 
