@@ -248,7 +248,7 @@ DISCLAIMER = (
     "Точность и актуальность информации не гарантируется — "
     "уточняйте наличие топлива на месте.\n"
     "Бот хранит только минимальные технические данные, необходимые для "
-    "его работы (<code>/history</code>, статистика), и никому их не передаёт."
+    "его работы (история запросов, статистика), и никому их не передаёт."
 )
 
 
@@ -258,7 +258,7 @@ async def cmd_start(message: Message):
     if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         await message.answer(
             "👋 <b>Привет!</b> Я показываю наличие топлива на АЗС.\n\n"
-            "Напишите: <code>/fuel Александров</code>\n\n"
+            "Напишите: /fuel Александров\n\n"
             f"{DISCLAIMER}",
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
@@ -295,11 +295,11 @@ async def cmd_help(message: Message):
         "📋 все АЗС или ⛽ только те, где есть топливо.\n\n"
         "<b>Статусы заправок:</b>\n"
         "✅ Есть   🟡 Очередь   🟠 Мало   ❌ Нет\n\n"
-        "<code>/history</code> — города, которые вы чаще всего проверяете\n"
-        "<code>/clear</code> — очистить сохранённую историю запросов\n\n"
+        "/history — города, которые вы чаще всего проверяете\n"
+        "/clear — очистить сохранённую историю запросов\n\n"
         "<b>В группах</b> используйте команды:\n"
-        "<code>/fuel Город</code> — все АЗС\n"
-        "<code>/fuelnow Город</code> — только с топливом\n\n"
+        "/fuel Город — все АЗС\n"
+        "/fuelnow Город — только с топливом\n\n"
         "Данные обновляются с <b>gdebenz.ru</b> в реальном времени, точность не гарантируется.\n\n"
         "/privacy — что бот хранит и за что не отвечает",
     )
@@ -319,9 +319,8 @@ async def cmd_privacy(message: Message):
         "топлива на месте или по телефону АЗС. Бот и его разработчик не несут "
         "ответственности за решения, принятые на основе показанных данных.\n\n"
         "<b>Данные.</b> Бот хранит только минимальные технические данные, "
-        "необходимые для его работы (<code>/history</code>, статистика), и "
-        "никому их не передаёт. Удалить свою историю можно командой "
-        "<code>/clear</code>.",
+        "необходимые для его работы (история запросов, статистика), и "
+        "никому их не передаёт. Удалить свою историю можно командой /clear.",
     )
 
 
@@ -331,7 +330,7 @@ async def _run_fuel_command(message: Message, mode: str):
     parts = (message.text or "").split(maxsplit=1)
     cmd_name = "fuel" if mode == "all" else "fuelnow"
     if len(parts) < 2 or not parts[1].strip():
-        await message.answer(f"Укажите город: <code>/{cmd_name} Александров</code>")
+        await message.answer(f"Укажите город: /{cmd_name} Александров")
         return
     city = parts[1].strip()
     _track(message)
@@ -389,7 +388,7 @@ async def cmd_clear(message: Message):
         InlineKeyboardButton(text="Отмена", callback_data="clear:cancel"),
     ]])
     await message.answer(
-        "Очистить вашу сохранённую историю запросов (для <code>/history</code> и статистики)?",
+        "Очистить вашу сохранённую историю запросов (для /history и статистики)?",
         reply_markup=kb,
     )
 
@@ -571,8 +570,8 @@ async def cmd_addadmin(message: Message):
     if len(parts) < 2 or not parts[1].strip():
         await message.answer(
             "Укажите ID или @username:\n"
-            "<code>/addadmin 123456789</code>\n"
-            "<code>/addadmin @username</code>"
+            "/addadmin 123456789\n"
+            "/addadmin @username"
         )
         return
     arg = parts[1].strip()
@@ -606,7 +605,7 @@ async def cmd_removeadmin(message: Message):
         return
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
-        await message.answer("Укажите ID или @username:\n<code>/removeadmin 123456789</code>")
+        await message.answer("Укажите ID или @username:\n/removeadmin 123456789")
         return
     arg = parts[1].strip()
     if arg.lstrip("@").isdigit():
@@ -643,7 +642,7 @@ async def cmd_broadcast(message: Message):
         return
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
-        await message.answer("Текст рассылки: <code>/broadcast Привет всем!</code>")
+        await message.answer("Текст рассылки: /broadcast Привет всем!")
         return
     text = parts[1].strip()
     users = list_all_users()
