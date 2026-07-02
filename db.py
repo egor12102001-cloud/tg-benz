@@ -163,6 +163,14 @@ def log_query(
         """, (user_id, chat_id, chat_type, city, city_norm, int(success), error, stations, now))
 
 
+def clear_user_history(user_id: int) -> int:
+    """Delete all stored queries for a user. Returns number of rows removed."""
+    with _connect() as con:
+        cur = con.execute("DELETE FROM queries WHERE user_id = ?", (user_id,))
+        con.execute("UPDATE users SET last_city = NULL WHERE user_id = ?", (user_id,))
+        return cur.rowcount
+
+
 def get_user_top_cities(user_id: int, limit: int = 10) -> list[dict]:
     """Cities a given user has queried most often, grouped by normalized name."""
     with _connect() as con:

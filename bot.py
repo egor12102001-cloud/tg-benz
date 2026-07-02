@@ -26,9 +26,9 @@ from aiogram.types import (
 )
 
 from db import (
-    get_stats, get_user, get_user_by_username, get_user_top_cities, init_db,
-    is_admin, list_admins, list_all_users, log_query, set_last_city, set_role,
-    upsert_user,
+    clear_user_history, get_stats, get_user, get_user_by_username,
+    get_user_top_cities, init_db, is_admin, list_admins, list_all_users,
+    log_query, set_last_city, set_role, upsert_user,
 )
 from scraper import (
     NearbyResult, Station, STATUS_EMOJI, STATUS_LABEL,
@@ -64,6 +64,7 @@ IS_PRIVATE = F.chat.type == ChatType.PRIVATE
 USER_COMMANDS = [
     BotCommand(command="start",   description="Начало работы"),
     BotCommand(command="history", description="Мои часто запрашиваемые города"),
+    BotCommand(command="clear",   description="Очистить мою историю запросов"),
     BotCommand(command="help",    description="Справка"),
     BotCommand(command="privacy", description="Данные и ответственность"),
 ]
@@ -292,7 +293,8 @@ async def cmd_help(message: Message):
         "📋 все АЗС или ⛽ только те, где есть топливо.\n\n"
         "<b>Статусы заправок:</b>\n"
         "✅ Есть   🟡 Очередь   🟠 Мало   ❌ Нет\n\n"
-        "<code>/history</code> — города, которые вы чаще всего проверяете\n\n"
+        "<code>/history</code> — города, которые вы чаще всего проверяете\n"
+        "<code>/clear</code> — очистить сохранённую историю запросов\n\n"
         "<b>В группах</b> используйте команды:\n"
         "<code>/fuel Город</code> — все АЗС\n"
         "<code>/fuelnow Город</code> — только с топливом\n\n"
@@ -371,6 +373,35 @@ async def cmd_history(message: Message):
         for c in cities[:5]
     ])
     await message.answer("\n".join(lines), reply_markup=kb)
+
+
+# ─── /clear ───────────────────────────────────────────────────────────────────
+
+@dp.message(Command("clear"))
+async def cmd_clear(message: Message):
+    _track(message)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🗑 Да, очистить", callback_data="clear:confirm"),
+        InlineKeyboardButton(text="Отмена", callback_data="clear:cancel"),
+    ]])
+    await message.answer(
+        "Очистить вашу сохранённую историю запросов (для <code>/history</code> и статистики)?",
+        reply_markup=kb,
+    )
+
+
+@dp.callback_query(F.data.startswith("clear:"))
+async def cb_clear(call: CallbackQuery):
+    action = call.data.split(":", 1)[1]
+    if action == "cancel":
+        await call.answer("Отменено")
+        await call.message.edit_text("Отменено, история не тронута.")
+        return
+
+    uid = call.from_user.id if call.from_user else 0
+    removed = clear_user_history(uid)
+    await call.answer("История очищена")
+    await call.message.edit_text(f"🗑 Готово. Удалено записей: {removed}.")
 
 
 # ─── plain text в личке → меню выбора режима ────────────────────────────────
