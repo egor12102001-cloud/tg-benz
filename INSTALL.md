@@ -21,7 +21,7 @@ sudo apt install -y python3 python3-pip python3-venv git \
 ## 3. Клонирование репозитория
 
 ```bash
-git clone https://github.com/egor12102001-cloud/tg-benz.git
+git clone https://github.com/ruby-rs/tg-benz.git
 cd tg-benz
 ```
 
